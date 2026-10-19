@@ -124,9 +124,15 @@ fun HomeScreen(vm: CullViewModel) {
 
     val authLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
         try {
+            if (res.resultCode != Activity.RESULT_OK || res.data == null) {
+                vm.message = "Google sign-in didn't finish. If you didn't cancel it, Google sign-in isn't set up " +
+                    "for this app yet — the Google Cloud steps in the README fix this."
+                return@rememberLauncherForActivityResult
+            }
             val r = Identity.getAuthorizationClient(activity).getAuthorizationResultFromIntent(res.data)
             GoogleAuth.token = r.accessToken
             if (r.accessToken != null) vm.startGooglePicker(openPicker)
+            else vm.message = "Google didn't grant access to Photos. Try again and allow access on the consent screen."
         } catch (e: Exception) {
             vm.message = authErrorText(e)
         }
