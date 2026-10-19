@@ -13,7 +13,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import kotlin.math.abs
 
 class MainActivity : Activity() {
@@ -24,17 +23,6 @@ class MainActivity : Activity() {
     private lateinit var image: ImageView
     private lateinit var status: TextView
     private lateinit var counter: TextView
-
-    private val picker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { selected ->
-        if (!selected.isNullOrEmpty()) {
-            photos.clear()
-            photos.addAll(selected)
-            decisions.clear()
-            history.clear()
-            index = 0
-            render()
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,7 +45,7 @@ class MainActivity : Activity() {
         status = TextView(this).apply { gravity = Gravity.CENTER; textSize = 18f }
         val choose = Button(this).apply {
             text = "Choose photos"
-            setOnClickListener { picker.launch("image/*") }
+            setOnClickListener { val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "image/*"; putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true); addCategory(Intent.CATEGORY_OPENABLE) }; startActivityForResult(intent, 1001) }
         }
         val actions = LinearLayout(this).apply {
             gravity = Gravity.CENTER
@@ -88,6 +76,17 @@ class MainActivity : Activity() {
             }
         }
         render()
+    }
+
+    @Deprecated("Legacy picker result callback")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 1001 && resultCode == RESULT_OK && data != null) {
+            val selected = mutableListOf<Uri>()
+            data.clipData?.let { clip -> for (i in 0 until clip.itemCount) selected.add(clip.getItemAt(i).uri) }
+            if (selected.isEmpty()) data.data?.let { selected.add(it) }
+            if (selected.isNotEmpty()) { photos.clear(); photos.addAll(selected); decisions.clear(); history.clear(); index = 0; render() }
+        }
     }
 
     private fun decide(value: String) {
