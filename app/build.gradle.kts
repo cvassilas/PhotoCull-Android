@@ -14,6 +14,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     // Fixed key so the SHA-1 registered with Google Cloud never changes between CI builds.
