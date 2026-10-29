@@ -26,16 +26,42 @@ import kotlin.math.abs
 import kotlin.math.ln
 
 /** Cheap per-photo fingerprint used for grouping and ranking. */
-data class Stats(
-    val hash: Long,       // 64-bit difference hash (perceptual)
+class Stats(
+    val hash: Long,        // 64-bit difference hash (layout / shapes)
+    val hist: FloatArray,  // 64-bin colour histogram, sums to 1 (palette — survives reframing)
     val sharpness: Double, // variance of the Laplacian — higher is sharper
     val exposure: Double,  // 0..1, 1 = well exposed, little clipping
 )
 
+/**
+ * How eagerly photos are grouped.
+ * [looseness] 0 = only near-identical bursts, 1 = anything from the same scene.
+ * [windowMin] max minutes between neighbouring shots in a group.
+ */
+data class GroupSettings(val looseness: Float = 0.6f, val windowMin: Int = 30) {
+    /** Minimum similarity score (0..1) for two photos to count as the same shot. */
+    val threshold get() = 0.86f - looseness * 0.38f
+
+    val label get() = when {
+        looseness < 0.2f -> "Strict — near-identical bursts only"
+        looseness < 0.45f -> "Normal — bursts and quick retakes"
+        looseness < 0.75f -> "Loose — retakes with small reframing"
+        else -> "Very loose — same scene, different angles"
+    }
+
+    companion object {
+        val windows = listOf(2, 10, 30, 120, 720)
+        fun windowLabel(m: Int) = when {
+            m < 60 -> "$m min"
+            m < 720 -> "${m / 60} h"
+            else -> "Same day"
+        }
+    }
+}
+
 object Analyzer {
-    /** Similar = taken within this window AND visually close. */
-    private const val MAX_GAP_MS = 20 * 60 * 1000L
-    private const val MAX_HAMMING = 10
+    /** How many recent group members a new photo is compared against. */
+    private const val LOOKBACK = 6
 
     private val faceDetector by lazy {
         FaceDetection.getClient(
@@ -96,6 +122,21 @@ object Analyzer {
         return h
     }
 
+    private fun colourHist(b: Bitmap): FloatArray {
+        val px = IntArray(b.width * b.height)
+        b.getPixels(px, 0, b.width, 0, 0, b.width, b.height)
+        val bins = FloatArray(64)
+        for (c in px) {
+            val r = ((c shr 16) and 0xFF) shr 6
+            val g = ((c shr 8) and 0xFF) shr 6
+            val bl = (c and 0xFF) shr 6
+            bins[(r shl 4) or (g shl 2) or bl] += 1f
+        }
+        val n = px.size.coerceAtLeast(1).toFloat()
+        for (i in bins.indices) bins[i] /= n
+        return bins
+    }
+
     private fun stats(b: Bitmap): Stats {
         val w = b.width
         val h = b.height
@@ -120,7 +161,7 @@ object Analyzer {
         val mean = total.toDouble() / g.size / 255.0
         val clipFrac = clipped.toDouble() / g.size
         val exposure = (1.0 - abs(mean - 0.5) * 1.4 - clipFrac * 2.0).coerceIn(0.0, 1.0)
-        return Stats(dHash(b), sharp, exposure)
+        return Stats(dHash(b), colourHist(b), sharp, exposure)
     }
 
     /** Fingerprints every photo (in parallel). */
@@ -142,20 +183,29 @@ object Analyzer {
 
     // ---------- grouping ----------
 
-    private fun similar(a: Photo, b: Photo, stats: Map<String, Stats>): Boolean {
-        if (abs(a.takenAt - b.takenAt) > MAX_GAP_MS) return false
-        val sa = stats[a.id] ?: return false
-        val sb = stats[b.id] ?: return false
-        return java.lang.Long.bitCount(sa.hash xor sb.hash) <= MAX_HAMMING
+    /** 0..1 — how alike two photos look. Mixes layout (hash) with colour palette (histogram). */
+    fun similarity(a: Stats, b: Stats): Float {
+        val ham = java.lang.Long.bitCount(a.hash xor b.hash)
+        val layout = (1f - ham / 32f).coerceIn(0f, 1f)
+        var colour = 0f
+        for (i in 0 until 64) colour += minOf(a.hist[i], b.hist[i])
+        return 0.6f * layout + 0.4f * colour
     }
 
-    /** Chains photos (in time order) into runs of near-duplicates. */
-    fun group(photos: List<Photo>, stats: Map<String, Stats>): List<List<Photo>> {
+    private fun similar(a: Photo, b: Photo, stats: Map<String, Stats>, s: GroupSettings): Boolean {
+        if (abs(a.takenAt - b.takenAt) > s.windowMin * 60_000L) return false
+        val sa = stats[a.id] ?: return false
+        val sb = stats[b.id] ?: return false
+        return similarity(sa, sb) >= s.threshold
+    }
+
+    /** Chains photos (in time order) into runs of look-alikes. Cheap — safe to rerun as settings change. */
+    fun group(photos: List<Photo>, stats: Map<String, Stats>, settings: GroupSettings): List<List<Photo>> {
         val sorted = photos.sortedBy { it.takenAt }
         val groups = ArrayList<MutableList<Photo>>()
         for (p in sorted) {
             val cur = groups.lastOrNull()
-            if (cur != null && cur.takeLast(3).any { similar(it, p, stats) }) cur += p
+            if (cur != null && cur.takeLast(LOOKBACK).any { similar(it, p, stats, settings) }) cur += p
             else groups += mutableListOf(p)
         }
         return groups
@@ -190,20 +240,21 @@ object Analyzer {
         return scores.indices.maxByOrNull { scores[it] } ?: 0
     }
 
-    /** Full pipeline: fingerprint, group, rank. Returns deck units newest-first. */
+    /** Groups already-fingerprinted photos and picks the best of each group. Returns deck units newest-first. */
     suspend fun buildUnits(
         context: Context,
         photos: List<Photo>,
+        stats: Map<String, Stats>,
+        settings: GroupSettings,
         onProgress: (label: String, fraction: Float) -> Unit,
     ): List<CullUnit> {
-        val stats = analyze(context, photos) { d, t -> onProgress("Comparing photos", d.toFloat() / t) }
-        val runs = group(photos, stats)
+        val runs = group(photos, stats, settings)
         val multi = runs.count { it.size > 1 }
         var ranked = 0
         val units = runs.map { run ->
             if (run.size == 1) CullUnit.Single(run[0])
             else {
-                onProgress("Picking the best of $multi bursts", ranked.toFloat() / multi.coerceAtLeast(1))
+                onProgress("Picking the best of $multi groups", ranked.toFloat() / multi.coerceAtLeast(1))
                 val best = bestIndex(context, run, stats)
                 ranked++
                 CullUnit.Group(run, best)

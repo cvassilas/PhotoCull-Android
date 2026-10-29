@@ -232,6 +232,7 @@ fun HomeScreen(vm: CullViewModel) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             ToggleRow("Group similar photos & pick the best", vm.groupSimilar) { vm.groupSimilar = it }
+            if (vm.groupSimilar) GroupingControls(vm.groupSettings) { vm.updateGroupSettings(it) }
             ToggleRow("Skip photos I've already reviewed", vm.skipReviewed) { vm.skipReviewed = it }
             val n = remember(vm.screen) { vm.reviewedCount() }
             if (n > 0) {

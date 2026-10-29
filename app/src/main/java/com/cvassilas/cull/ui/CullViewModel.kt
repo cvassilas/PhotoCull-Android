@@ -11,6 +11,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.cvassilas.cull.analysis.Analyzer
+import com.cvassilas.cull.analysis.GroupSettings
+import com.cvassilas.cull.analysis.Stats
 import com.cvassilas.cull.data.Album
 import com.cvassilas.cull.data.CullUnit
 import com.cvassilas.cull.data.Decision
@@ -39,6 +41,7 @@ sealed interface Screen {
 class CullViewModel(app: Application) : AndroidViewModel(app) {
     private val ctx get() = getApplication<Application>()
     private val reviewed = ReviewedStore(app)
+    private val prefs = app.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
 
     var screen by mutableStateOf<Screen>(Screen.Home)
         private set
@@ -46,6 +49,21 @@ class CullViewModel(app: Application) : AndroidViewModel(app) {
 
     // Home settings
     var groupSimilar by mutableStateOf(true)
+    var groupSettings by mutableStateOf(
+        GroupSettings(
+            looseness = prefs.getFloat("looseness", GroupSettings().looseness),
+            windowMin = prefs.getInt("windowMin", GroupSettings().windowMin),
+        )
+    )
+        private set
+
+    fun updateGroupSettings(s: GroupSettings) {
+        groupSettings = s
+        prefs.edit().putFloat("looseness", s.looseness).putInt("windowMin", s.windowMin).apply()
+    }
+
+    /** Fingerprints for the current deck — kept so regrouping doesn't need to re-read every photo. */
+    private var stats: Map<String, Stats> = emptyMap()
     var skipReviewed by mutableStateOf(true)
     var albums by mutableStateOf<List<Album>>(emptyList())
         private set
@@ -150,8 +168,10 @@ class CullViewModel(app: Application) : AndroidViewModel(app) {
         }
         units = if (groupSimilar && photos.size > 1) {
             screen = Screen.Working("Comparing photos", 0f)
-            Analyzer.buildUnits(ctx, photos) { label, f -> screen = Screen.Working(label, f) }
+            stats = Analyzer.analyze(ctx, photos) { d, t -> screen = Screen.Working("Comparing photos", d.toFloat() / t) }
+            Analyzer.buildUnits(ctx, photos, stats, groupSettings) { label, f -> screen = Screen.Working(label, f) }
         } else {
+            stats = emptyMap()
             photos.map { CullUnit.Single(it) }
         }
         index = 0
@@ -176,6 +196,46 @@ class CullViewModel(app: Application) : AndroidViewModel(app) {
         val id = pickerSessionId ?: return
         pickerSessionId = null
         CoroutineScope(Dispatchers.IO).launch { PickerApi.deleteSession(id) }
+    }
+
+    // ---------- regrouping ----------
+
+    /** Photos not yet swiped. */
+    private fun remainingPhotos(): List<Photo> = units.drop(index).flatMap {
+        when (it) {
+            is CullUnit.Single -> listOf(it.photo)
+            is CullUnit.Group -> it.photos
+        }
+    }
+
+    /** Live preview for the settings sheet: (groups, photos inside groups) among the remaining photos. */
+    fun previewGrouping(s: GroupSettings): Pair<Int, Int>? {
+        if (stats.isEmpty()) return null
+        val runs = Analyzer.group(remainingPhotos(), stats, s).filter { it.size > 1 }
+        return runs.size to runs.sumOf { it.size }
+    }
+
+    val canRegroup get() = screen == Screen.Cull && units.size > index
+
+    /** Applies [s] to every photo not yet swiped. Already-decided photos are untouched. */
+    fun regroup(s: GroupSettings) {
+        updateGroupSettings(s)
+        val done = units.take(index)
+        val rest = remainingPhotos()
+        if (rest.isEmpty()) return
+        launchWork {
+            if (stats.isEmpty() || rest.any { it.id !in stats }) {
+                screen = Screen.Working("Comparing photos", 0f)
+                stats = stats + Analyzer.analyze(ctx, rest.filter { it.id !in stats }) { d, t ->
+                    screen = Screen.Working("Comparing photos", d.toFloat() / t)
+                }
+            }
+            screen = Screen.Working("Regrouping", null)
+            val regrouped = Analyzer.buildUnits(ctx, rest, stats, s) { label, f -> screen = Screen.Working(label, f) }
+            units = done + regrouped
+            // Undo history only points backwards, so it stays valid.
+            screen = Screen.Cull
+        }
     }
 
     // ---------- swiping ----------

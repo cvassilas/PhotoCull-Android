@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -133,6 +134,8 @@ fun CullScreen(vm: CullViewModel) {
         }
     }
 
+    var showGrouping by remember { mutableStateOf(false) }
+
     Column(Modifier.fillMaxSize()) {
         // ---- top bar ----
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -142,8 +145,10 @@ fun CullScreen(vm: CullViewModel) {
             Text("✓ ${vm.keptCount}", color = KeepGreen, fontWeight = FontWeight.Bold)
             Spacer(Modifier.width(12.dp))
             Text("✕ ${vm.binCount}", color = BinRed, fontWeight = FontWeight.Bold)
+            IconButton(onClick = { showGrouping = true }) { Icon(Icons.Filled.Tune, "Grouping") }
             TextButton(onClick = { vm.openReview() }) { Text("Review") }
         }
+        if (showGrouping) GroupingSheet(vm) { showGrouping = false }
         LinearProgressIndicator(
             progress = { vm.index.toFloat() / vm.units.size.coerceAtLeast(1) },
             modifier = Modifier.fillMaxWidth().height(3.dp),
